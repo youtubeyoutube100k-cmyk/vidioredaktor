@@ -1,0 +1,194 @@
+name: Video Editor Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_url:
+        description: 'Прямая ссылка на исходное видео (MP4/MOV)'
+        required: true
+        type: string
+      mode:
+        description: 'Формат 9:16 (blur - размытый фон, crop - центрирование)'
+        required: false
+        default: 'blur'
+        type: choice
+        options:
+          - blur
+          - crop
+      min_silence:
+        description: 'Порог тишины для вырезания (в секундах)'
+        required: false
+        default: '0.35'
+        type: string
+
+jobs:
+  process-video:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System FFmpeg
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install --upgrade pip
+          pip install faster-whisper
+
+      - name: Download Video
+        run: |
+          curl -L "${{ github.event.inputs.video_url }}" -o source_input.mp4
+          ls -lh source_input.mp4
+
+      - name: Process Video & Subtitles
+        run: |
+          python - << 'EOF'
+          import subprocess, sys, re, math, os
+          from faster_whisper import WhisperModel
+
+          input_file = "source_input.mp4"
+          mode = "${{ github.event.inputs.mode }}"
+          min_silence = float("${{ github.event.inputs.min_silence }}")
+
+          print("[1/4] Поиск речевых фрагментов и вырезание пауз...")
+          detect_cmd = [
+              "ffmpeg", "-i", input_file, "-vn",
+              "-af", f"silencedetect=noise=-32dB:d={min_silence}",
+              "-f", "null", "-"
+          ]
+          p = subprocess.run(detect_cmd, stderr=subprocess.PIPE, text=True)
+
+          starts, ends = [], []
+          for line in p.stderr.splitlines():
+              if "silence_start:" in line:
+                  m = re.search(r"silence_start:\s*([\d\.]+)", line)
+                  if m: starts.append(float(m.group(1)))
+              elif "silence_end:" in line:
+                  m = re.search(r"silence_end:\s*([\d\.]+)", line)
+                  if m: ends.append(float(m.group(1)))
+
+          dur_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", input_file]
+          total_duration = float(subprocess.run(dur_cmd, capture_output=True, text=True).stdout.strip())
+
+          segments = []
+          curr = 0.0
+          for i in range(len(starts)):
+              s_end = ends[i] if i < len(ends) else total_duration
+              if starts[i] > curr:
+                  segments.append((max(0.0, curr - 0.03), min(total_duration, starts[i] + 0.05)))
+              curr = s_end
+          if curr < total_duration:
+              segments.append((max(0.0, curr - 0.03), total_duration))
+
+          if not segments:
+              segments = [(0.0, total_duration)]
+
+          filter_chains = []
+          join_tags = []
+          for idx, (s, e) in enumerate(segments):
+              filter_chains.append(f"[0:v]trim={s:.3f}:{e:.3f},setpts=PTS-STARTPTS[v{idx}];")
+              filter_chains.append(f"[0:a]atrim={s:.3f}:{e:.3f},asetpts=PTS-STARTPTS[a{idx}];")
+              join_tags.append(f"[v{idx}][a{idx}]")
+
+          filter_concat = "".join(filter_chains) + "".join(join_tags) + f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
+          subprocess.run([
+              "ffmpeg", "-y", "-i", input_file,
+              "-filter_complex", filter_concat,
+              "-map", "[outv]", "-map", "[outa]",
+              "-c:v", "libx264", "-preset", "fast",
+              "-c:a", "aac", "step1_jumpcut.mp4"
+          ], check=True)
+
+          print("[2/4] Кадрирование под 9:16 (1080x1920)...")
+          if mode == "crop":
+              vf = "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[outv]"
+          else:
+              vf = (
+                  "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+                  "crop=1080:1920,boxblur=20:5[bg];"
+                  "[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+                  "[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
+              )
+
+          subprocess.run([
+              "ffmpeg", "-y", "-i", "step1_jumpcut.mp4",
+              "-filter_complex", vf,
+              "-map", "[outv]", "-map", "0:a?",
+              "-c:v", "libx264", "-preset", "fast",
+              "-c:a", "copy", "step2_vertical.mp4"
+          ], check=True)
+
+          print("[3/4] Пословное распознавание Whisper и генерация караоке...")
+          model = WhisperModel("base", device="cpu", compute_type="int8")
+          segs, _ = model.transcribe("step2_vertical.mp4", word_timestamps=True)
+
+          words = []
+          for seg in segs:
+              if seg.words:
+                  for w in seg.words:
+                      txt = w.word.strip().upper()
+                      if txt:
+                          words.append({"word": txt, "start": w.start, "end": w.end})
+
+          def format_time(t):
+              h = int(t // 3600)
+              m = int((t % 3600) // 60)
+              s = int(t % 60)
+              cs = int(math.floor((t - int(t)) * 100))
+              return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+
+          chunks = [words[i:i + 3] for i in range(0, len(words), 3)]
+          ass_header = """[Script Info]
+          ScriptType: v4.00+
+          PlayResX: 1080
+          PlayResY: 1920
+          ScaledBorderAndShadow: yes
+
+          [V4+ Styles]
+          Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+          Style: ViralKaraoke,Arial Black,75,&H00FFFFFF,&H0000FFFF,&H00000000,&H90000000,-1,0,0,0,100,100,2,0,1,5,2.5,5,50,50,0,1
+
+          [Events]
+          Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+          """
+
+          dialogues = []
+          for chunk in chunks:
+              start_t = chunk[0]["start"]
+              end_t = max(chunk[-1]["end"], start_t + 0.4)
+              parts = []
+              for item in chunk:
+                  dur = max(1, int(round((item["end"] - item["start"]) * 100)))
+                  parts.append(f"{{\\k{dur}}}{item['word']}")
+              line_text = " ".join(parts)
+              dialogues.append(f"Dialogue: 0,{format_time(start_t)},{format_time(end_t)},ViralKaraoke,,0,0,0,,{line_text}")
+
+          with open("subtitles.ass", "w", encoding="utf-8") as f:
+              f.write(ass_header.strip() + "\n" + "\n".join(dialogues) + "\n")
+
+          print("[4/4] Финальный рендер субтитров...")
+          subprocess.run([
+              "ffmpeg", "-y", "-i", "step2_vertical.mp4",
+              "-vf", "ass=subtitles.ass",
+              "-c:v", "libx264", "-preset", "fast", "-crf", "19",
+              "-c:a", "aac", "-b:a", "192k",
+              "final_shorts.mp4"
+          ], check=True)
+          print("Рендер успешно завершен.")
+          EOF
+
+      - name: Save Output Video
+        uses: actions/upload-artifact@v4
+        with:
+          name: final_shorts_video
+          path: final_shorts.mp4
+          retention-days: 7

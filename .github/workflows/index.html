@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VidioRedaktor — Облачный монтаж Shorts</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: #111827;
+      --border: #1f2937;
+      --accent: #00f2fe;
+      --accent-grad: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+      --text: #f9fafb;
+      --muted: #9ca3af;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+    .container { background-color: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 36px; max-width: 520px; width: 100%; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+    h1 { font-size: 24px; font-weight: 800; margin-bottom: 8px; }
+    h1 span { background: var(--accent-grad); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    p.desc { color: var(--muted); font-size: 14px; margin-bottom: 24px; line-height: 1.5; }
+    .form-group { margin-bottom: 18px; display: flex; flex-direction: column; gap: 8px; }
+    label { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    input, select { background: #1a2234; border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; color: var(--text); font-size: 14px; outline: none; transition: border-color 0.2s; }
+    input:focus, select:focus { border-color: #38bdf8; }
+    .btn { background: var(--accent-grad); border: none; border-radius: 8px; color: #041019; font-weight: 700; font-size: 15px; padding: 14px; cursor: pointer; margin-top: 10px; width: 100%; transition: opacity 0.2s; }
+    .btn:hover { opacity: 0.9; }
+    .status-area { margin-top: 20px; padding: 14px; border-radius: 8px; font-size: 13px; display: none; line-height: 1.5; }
+    .status-area.info { background: #075985; color: #e0f2fe; display: block; }
+    .status-area.error { background: #7f1d1d; color: #fecaca; display: block; }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <h1>Vidio<span>Redaktor</span> AI</h1>
+    <p class="desc">Автоматическое вырезание пауз, кроп 9:16 и караоке-субтитры в облаке GitHub Actions без нагрузок на ваш компьютер.</p>
+
+    <div class="form-group">
+      <label for="ghToken">GitHub Personal Access Token:</label>
+      <input type="password" id="ghToken" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx">
+    </div>
+
+    <div class="form-group">
+      <label for="videoUrl">Прямая ссылка на видео (MP4 / Web):</label>
+      <input type="url" id="videoUrl" placeholder="https://example.com/video.mp4">
+    </div>
+
+    <div class="form-group">
+      <label for="mode">Формат кадрирования:</label>
+      <select id="mode">
+        <option value="blur">Размытие по бокам (Blur background)</option>
+        <option value="crop">Прямой кроп центра кадра (Center crop)</option>
+      </select>
+    </div>
+
+    <button class="btn" onclick="startWorkflow()">⚡ Запустить авто-монтаж</button>
+    <div id="statusBox" class="status-area"></div>
+  </div>
+
+  <script>
+    const REPO_OWNER = "youtubeyoutube100k-cmyk";
+    const REPO_NAME = "vidioredaktor";
+
+    async function startWorkflow() {
+      const token = document.getElementById("ghToken").value.trim();
+      const videoUrl = document.getElementById("videoUrl").value.trim();
+      const mode = document.getElementById("mode").value;
+      const statusBox = document.getElementById("statusBox");
+
+      if (!token || !videoUrl) {
+        statusBox.className = "status-area error";
+        statusBox.textContent = "Пожалуйста, укажите GitHub Token и ссылку на видео.";
+        return;
+      }
+
+      statusBox.className = "status-area info";
+      statusBox.textContent = "Запуск процесса в GitHub Actions...";
+
+      try {
+        const response = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/workflows/render.yml/dispatches`, {
+          method: "POST",
+          headers: {
+            "Accept": "application/vnd.github+json",
+            "Authorization": `Bearer ${token}`,
+            "X-GitHub-Api-Version": "2022-11-28"
+          },
+          body: JSON.stringify({
+            ref: "main",
+            inputs: {
+              video_url: videoUrl,
+              mode: mode,
+              min_silence: "0.35"
+            }
+          })
+        });
+
+        if (response.status === 204) {
+          statusBox.className = "status-area info";
+          statusBox.innerHTML = `✅ <b>Монтаж запущен!</b><br>Следите за прогрессом во вкладке <a href="https://github.com/${REPO_OWNER}/${REPO_NAME}/actions" target="_blank" style="color:var(--accent);">Actions</a>. После завершения видео появится в секции Artifacts.`;
+        } else {
+          const err = await response.json();
+          statusBox.className = "status-area error";
+          statusBox.textContent = `Ошибка: ${err.message || "Проверьте права токена"}`;
+        }
+      } catch (err) {
+        statusBox.className = "status-area error";
+        statusBox.textContent = "Сетевая ошибка при запросе к GitHub API.";
+      }
+    }
+  </script>
+</body>
+</html>
